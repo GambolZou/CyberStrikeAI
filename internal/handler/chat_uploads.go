@@ -86,8 +86,10 @@ func (h *ChatUploadsHandler) List(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if _, err := os.Stat(root); os.IsNotExist(err) {
-		c.JSON(http.StatusOK, gin.H{"files": []ChatUploadFileItem{}})
+	// 保证根目录存在，否则「按文件夹」浏览时无法 mkdir，且首次列表为空时界面无路径工具栏
+	if err := os.MkdirAll(root, 0755); err != nil {
+		h.logger.Warn("创建 chat_uploads 根目录失败", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	var files []ChatUploadFileItem

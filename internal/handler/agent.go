@@ -122,9 +122,10 @@ func (h *AgentHandler) SetAgentsMarkdownDir(absDir string) {
 
 // ChatAttachment 聊天附件（用户上传的文件）
 type ChatAttachment struct {
-	FileName string `json:"fileName"` // 文件名
-	Content  string `json:"content"`  // 文本内容或 base64（由 MimeType 决定是否解码）
-	MimeType string `json:"mimeType,omitempty"`
+	FileName   string `json:"fileName"`             // 展示用文件名
+	Content    string `json:"content,omitempty"`    // 文本或 base64；若已预先上传到服务器可留空
+	MimeType   string `json:"mimeType,omitempty"`
+	ServerPath string `json:"serverPath,omitempty"` // 已保存在 chat_uploads 下的绝对路径（由 POST /api/chat-uploads 返回）
 }
 
 // ChatRequest 聊天请求
@@ -141,7 +142,115 @@ const (
 	chatUploadsDirName = "chat_uploads" // 对话附件保存的根目录（相对当前工作目录）
 )
 
-// saveAttachmentsToDateAndConversationDir 将附件保存到 chat_uploads/YYYY-MM-DD/{conversationID}/，返回每个文件的保存路径（与 attachments 顺序一致）
+// validateChatAttachmentServerPath 校验绝对路径落在工作目录 chat_uploads 下且为普通文件（防路径穿越）
+func validateChatAttachmentServerPath(abs string) (string, error) {
+	p := strings.TrimSpace(abs)
+	if p == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("获取当前工作目录失败: %w", err)
+	}
+	root := filepath.Join(cwd, chatUploadsDirName)
+	rootAbs, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return "", err
+	}
+	pathAbs, err := filepath.Abs(filepath.Clean(p))
+	if err != nil {
+		return "", err
+	}
+	sep := string(filepath.Separator)
+	if pathAbs != rootAbs && !strings.HasPrefix(pathAbs, rootAbs+sep) {
+		return "", fmt.Errorf("path outside chat_uploads")
+	}
+	st, err := os.Stat(pathAbs)
+	if err != nil {
+		return "", err
+	}
+	if st.IsDir() {
+		return "", fmt.Errorf("not a regular file")
+	}
+	return pathAbs, nil
+}
+
+// avoidChatUploadDestCollision 若 path 已存在则生成带时间戳+随机后缀的新文件名（与上传接口命名风格一致）
+func avoidChatUploadDestCollision(path string) string {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return path
+	}
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	ext := filepath.Ext(base)
+	nameNoExt := strings.TrimSuffix(base, ext)
+	suffix := fmt.Sprintf("_%s_%s", time.Now().Format("150405"), shortRand(6))
+	var unique string
+	if ext != "" {
+		unique = nameNoExt + suffix + ext
+	} else {
+		unique = base + suffix
+	}
+	return filepath.Join(dir, unique)
+}
+
+// relocateManualOrNewUploadToConversation 无会话 ID 时前端会上传到 …/日期/_manual；首条消息创建会话后，将文件移入 …/日期/{conversationId}/ 以便按对话隔离。
+func relocateManualOrNewUploadToConversation(absPath, conversationID string, logger *zap.Logger) (string, error) {
+	conv := strings.TrimSpace(conversationID)
+	if conv == "" {
+		return absPath, nil
+	}
+	convSan := strings.ReplaceAll(conv, string(filepath.Separator), "_")
+	if convSan == "" || convSan == "_manual" || convSan == "_new" {
+		return absPath, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return absPath, err
+	}
+	rootAbs, err := filepath.Abs(filepath.Join(cwd, chatUploadsDirName))
+	if err != nil {
+		return absPath, err
+	}
+	rel, err := filepath.Rel(rootAbs, absPath)
+	if err != nil {
+		return absPath, nil
+	}
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	var segs []string
+	for _, p := range strings.Split(rel, "/") {
+		if p != "" && p != "." {
+			segs = append(segs, p)
+		}
+	}
+	// 仅处理扁平结构：日期/_manual|_new/文件名
+	if len(segs) != 3 {
+		return absPath, nil
+	}
+	datePart, placeFolder, baseName := segs[0], segs[1], segs[2]
+	if placeFolder != "_manual" && placeFolder != "_new" {
+		return absPath, nil
+	}
+	targetDir := filepath.Join(rootAbs, datePart, convSan)
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", fmt.Errorf("创建会话附件目录失败: %w", err)
+	}
+	dest := filepath.Join(targetDir, baseName)
+	dest = avoidChatUploadDestCollision(dest)
+	if err := os.Rename(absPath, dest); err != nil {
+		return "", fmt.Errorf("将附件移入会话目录失败: %w", err)
+	}
+	out, _ := filepath.Abs(dest)
+	if logger != nil {
+		logger.Info("对话附件已从占位目录移入会话目录",
+			zap.String("from", absPath),
+			zap.String("to", out),
+			zap.String("conversationId", conv))
+	}
+	return out, nil
+}
+
+// saveAttachmentsToDateAndConversationDir 处理附件：若带 serverPath 则仅校验已存在文件；否则将 content 写入 chat_uploads/YYYY-MM-DD/{conversationID}/。
 // conversationID 为空时使用 "_new" 作为目录名（新对话尚未有 ID）
 func saveAttachmentsToDateAndConversationDir(attachments []ChatAttachment, conversationID string, logger *zap.Logger) (savedPaths []string, err error) {
 	if len(attachments) == 0 {
@@ -164,6 +273,24 @@ func saveAttachmentsToDateAndConversationDir(attachments []ChatAttachment, conve
 	}
 	savedPaths = make([]string, 0, len(attachments))
 	for i, a := range attachments {
+		if sp := strings.TrimSpace(a.ServerPath); sp != "" {
+			valid, verr := validateChatAttachmentServerPath(sp)
+			if verr != nil {
+				return nil, fmt.Errorf("附件 %s: %w", a.FileName, verr)
+			}
+			finalPath, rerr := relocateManualOrNewUploadToConversation(valid, conversationID, logger)
+			if rerr != nil {
+				return nil, fmt.Errorf("附件 %s: %w", a.FileName, rerr)
+			}
+			savedPaths = append(savedPaths, finalPath)
+			if logger != nil {
+				logger.Debug("对话附件使用已上传路径", zap.Int("index", i+1), zap.String("fileName", a.FileName), zap.String("path", finalPath))
+			}
+			continue
+		}
+		if strings.TrimSpace(a.Content) == "" {
+			return nil, fmt.Errorf("附件 %s 缺少内容或未提供 serverPath", a.FileName)
+		}
 		raw, decErr := attachmentContentToBytes(a)
 		if decErr != nil {
 			return nil, fmt.Errorf("附件 %s 解码失败: %w", a.FileName, decErr)
