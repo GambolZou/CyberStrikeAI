@@ -24,6 +24,7 @@ import (
 	"cyberstrike-ai/internal/skills"
 
 	"github.com/gin-gonic/gin"
+	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
 )
 
@@ -81,6 +82,9 @@ type AgentHandler struct {
 	}
 	skillsManager     *skills.Manager // Skills管理器
 	agentsMarkdownDir string          // 多代理：Markdown 子 Agent 目录（绝对路径，空则不从磁盘合并）
+	batchCronParser   cron.Parser
+	batchRunnerMu     sync.Mutex
+	batchRunning      map[string]struct{}
 }
 
 // NewAgentHandler 创建新的Agent处理器
@@ -93,14 +97,18 @@ func NewAgentHandler(agent *agent.Agent, db *database.DB, cfg *config.Config, lo
 		logger.Warn("从数据库加载批量任务队列失败", zap.Error(err))
 	}
 
-	return &AgentHandler{
+	handler := &AgentHandler{
 		agent:            agent,
 		db:               db,
 		logger:           logger,
 		tasks:            NewAgentTaskManager(),
 		batchTaskManager: batchTaskManager,
 		config:           cfg,
+		batchCronParser:  cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor),
+		batchRunning:     make(map[string]struct{}),
 	}
+	go handler.batchQueueSchedulerLoop()
+	return handler
 }
 
 // SetKnowledgeManager 设置知识库管理器（用于记录检索日志）
@@ -1575,9 +1583,26 @@ func (h *AgentHandler) ListCompletedTasks(c *gin.Context) {
 
 // BatchTaskRequest 批量任务请求
 type BatchTaskRequest struct {
-	Title string   `json:"title"`                    // 任务标题（可选）
-	Tasks []string `json:"tasks" binding:"required"` // 任务列表，每行一个任务
-	Role  string   `json:"role,omitempty"`           // 角色名称（可选，空字符串表示默认角色）
+	Title        string   `json:"title"`                    // 任务标题（可选）
+	Tasks        []string `json:"tasks" binding:"required"` // 任务列表，每行一个任务
+	Role         string   `json:"role,omitempty"`           // 角色名称（可选，空字符串表示默认角色）
+	AgentMode    string   `json:"agentMode,omitempty"`      // single | multi
+	ScheduleMode string   `json:"scheduleMode,omitempty"`   // manual | cron
+	CronExpr     string   `json:"cronExpr,omitempty"`       // scheduleMode=cron 时必填
+}
+
+func normalizeBatchQueueAgentMode(mode string) string {
+	if strings.TrimSpace(mode) == "multi" {
+		return "multi"
+	}
+	return "single"
+}
+
+func normalizeBatchQueueScheduleMode(mode string) string {
+	if strings.TrimSpace(mode) == "cron" {
+		return "cron"
+	}
+	return "manual"
 }
 
 // CreateBatchQueue 创建批量任务队列
@@ -1606,7 +1631,25 @@ func (h *AgentHandler) CreateBatchQueue(c *gin.Context) {
 		return
 	}
 
-	queue := h.batchTaskManager.CreateBatchQueue(req.Title, req.Role, validTasks)
+	agentMode := normalizeBatchQueueAgentMode(req.AgentMode)
+	scheduleMode := normalizeBatchQueueScheduleMode(req.ScheduleMode)
+	cronExpr := strings.TrimSpace(req.CronExpr)
+	var nextRunAt *time.Time
+	if scheduleMode == "cron" {
+		if cronExpr == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "启用 Cron 调度时，调度表达式不能为空"})
+			return
+		}
+		schedule, err := h.batchCronParser.Parse(cronExpr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的 Cron 表达式: " + err.Error()})
+			return
+		}
+		next := schedule.Next(time.Now())
+		nextRunAt = &next
+	}
+
+	queue := h.batchTaskManager.CreateBatchQueue(req.Title, req.Role, agentMode, scheduleMode, cronExpr, nextRunAt, validTasks)
 	c.JSON(http.StatusOK, gin.H{
 		"queueId": queue.ID,
 		"queue":   queue,
@@ -1699,21 +1742,15 @@ func (h *AgentHandler) ListBatchQueues(c *gin.Context) {
 // StartBatchQueue 开始执行批量任务队列
 func (h *AgentHandler) StartBatchQueue(c *gin.Context) {
 	queueID := c.Param("queueId")
-	queue, exists := h.batchTaskManager.GetBatchQueue(queueID)
-	if !exists {
+	ok, err := h.startBatchQueueExecution(queueID, false)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在"})
 		return
 	}
-
-	if queue.Status != "pending" && queue.Status != "paused" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "队列状态不允许启动"})
-		return
-	}
-
-	// 在后台执行批量任务
-	go h.executeBatchQueue(queueID)
-
-	h.batchTaskManager.UpdateQueueStatus(queueID, "running")
 	c.JSON(http.StatusOK, gin.H{"message": "批量任务已开始执行", "queueId": queueID})
 }
 
@@ -1726,6 +1763,28 @@ func (h *AgentHandler) PauseBatchQueue(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "批量任务已暂停"})
+}
+
+// SetBatchQueueScheduleEnabled 开启/关闭 Cron 自动调度（手工执行不受影响）
+func (h *AgentHandler) SetBatchQueueScheduleEnabled(c *gin.Context) {
+	queueID := c.Param("queueId")
+	if _, exists := h.batchTaskManager.GetBatchQueue(queueID); !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在"})
+		return
+	}
+	var req struct {
+		ScheduleEnabled bool `json:"scheduleEnabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !h.batchTaskManager.SetScheduleEnabled(queueID, req.ScheduleEnabled) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在"})
+		return
+	}
+	queue, _ := h.batchTaskManager.GetBatchQueue(queueID)
+	c.JSON(http.StatusOK, gin.H{"queue": queue})
 }
 
 // DeleteBatchQueue 删除批量任务队列
@@ -1824,8 +1883,125 @@ func (h *AgentHandler) DeleteBatchTask(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "任务已删除", "queue": queue})
 }
 
+func (h *AgentHandler) markBatchQueueRunning(queueID string) bool {
+	h.batchRunnerMu.Lock()
+	defer h.batchRunnerMu.Unlock()
+	if _, exists := h.batchRunning[queueID]; exists {
+		return false
+	}
+	h.batchRunning[queueID] = struct{}{}
+	return true
+}
+
+func (h *AgentHandler) unmarkBatchQueueRunning(queueID string) {
+	h.batchRunnerMu.Lock()
+	defer h.batchRunnerMu.Unlock()
+	delete(h.batchRunning, queueID)
+}
+
+func (h *AgentHandler) nextBatchQueueRunAt(cronExpr string, from time.Time) (*time.Time, error) {
+	expr := strings.TrimSpace(cronExpr)
+	if expr == "" {
+		return nil, nil
+	}
+	schedule, err := h.batchCronParser.Parse(expr)
+	if err != nil {
+		return nil, err
+	}
+	next := schedule.Next(from)
+	return &next, nil
+}
+
+func (h *AgentHandler) startBatchQueueExecution(queueID string, scheduled bool) (bool, error) {
+	queue, exists := h.batchTaskManager.GetBatchQueue(queueID)
+	if !exists {
+		return false, nil
+	}
+	if !h.markBatchQueueRunning(queueID) {
+		return true, nil
+	}
+
+	if scheduled {
+		if queue.ScheduleMode != "cron" {
+			h.unmarkBatchQueueRunning(queueID)
+			err := fmt.Errorf("队列未启用 cron 调度")
+			h.batchTaskManager.SetLastScheduleError(queueID, err.Error())
+			return true, err
+		}
+		if queue.Status == "running" || queue.Status == "paused" || queue.Status == "cancelled" {
+			h.unmarkBatchQueueRunning(queueID)
+			err := fmt.Errorf("当前队列状态不允许被调度执行")
+			h.batchTaskManager.SetLastScheduleError(queueID, err.Error())
+			return true, err
+		}
+		if !h.batchTaskManager.ResetQueueForRerun(queueID) {
+			h.unmarkBatchQueueRunning(queueID)
+			err := fmt.Errorf("重置队列失败")
+			h.batchTaskManager.SetLastScheduleError(queueID, err.Error())
+			return true, err
+		}
+		queue, _ = h.batchTaskManager.GetBatchQueue(queueID)
+	} else if queue.Status != "pending" && queue.Status != "paused" {
+		h.unmarkBatchQueueRunning(queueID)
+		return true, fmt.Errorf("队列状态不允许启动")
+	}
+
+	if queue != nil && queue.AgentMode == "multi" && (h.config == nil || !h.config.MultiAgent.Enabled) {
+		h.unmarkBatchQueueRunning(queueID)
+		err := fmt.Errorf("当前队列配置为多代理，但系统未启用多代理")
+		if scheduled {
+			h.batchTaskManager.SetLastScheduleError(queueID, err.Error())
+		}
+		return true, err
+	}
+
+	if scheduled {
+		h.batchTaskManager.RecordScheduledRunStart(queueID)
+	}
+	h.batchTaskManager.UpdateQueueStatus(queueID, "running")
+	if queue != nil && queue.ScheduleMode == "cron" {
+		nextRunAt, err := h.nextBatchQueueRunAt(queue.CronExpr, time.Now())
+		if err == nil {
+			h.batchTaskManager.UpdateQueueSchedule(queueID, "cron", queue.CronExpr, nextRunAt)
+		}
+	}
+
+	go h.executeBatchQueue(queueID)
+	return true, nil
+}
+
+func (h *AgentHandler) batchQueueSchedulerLoop() {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		queues := h.batchTaskManager.GetAllQueues()
+		now := time.Now()
+		for _, queue := range queues {
+			if queue == nil || queue.ScheduleMode != "cron" || !queue.ScheduleEnabled || queue.Status == "cancelled" || queue.Status == "running" || queue.Status == "paused" {
+				continue
+			}
+			nextRunAt := queue.NextRunAt
+			if nextRunAt == nil {
+				next, err := h.nextBatchQueueRunAt(queue.CronExpr, now)
+				if err != nil {
+					h.logger.Warn("批量任务 cron 表达式无效，跳过调度", zap.String("queueId", queue.ID), zap.String("cronExpr", queue.CronExpr), zap.Error(err))
+					continue
+				}
+				h.batchTaskManager.UpdateQueueSchedule(queue.ID, "cron", queue.CronExpr, next)
+				nextRunAt = next
+			}
+			if nextRunAt != nil && (nextRunAt.Before(now) || nextRunAt.Equal(now)) {
+				if _, err := h.startBatchQueueExecution(queue.ID, true); err != nil {
+					h.logger.Warn("自动调度批量任务失败", zap.String("queueId", queue.ID), zap.Error(err))
+				}
+			}
+		}
+	}
+}
+
 // executeBatchQueue 执行批量任务队列
 func (h *AgentHandler) executeBatchQueue(queueID string) {
+	defer h.unmarkBatchQueueRunning(queueID)
 	h.logger.Info("开始执行批量任务队列", zap.String("queueId", queueID))
 
 	for {
@@ -1838,7 +2014,17 @@ func (h *AgentHandler) executeBatchQueue(queueID string) {
 		// 获取下一个任务
 		task, hasNext := h.batchTaskManager.GetNextTask(queueID)
 		if !hasNext {
-			// 所有任务完成
+			// 所有任务完成：汇总子任务失败信息便于排障
+			q, ok := h.batchTaskManager.GetBatchQueue(queueID)
+			lastRunErr := ""
+			if ok {
+				for _, t := range q.Tasks {
+					if t.Status == "failed" && t.Error != "" {
+						lastRunErr = t.Error
+					}
+				}
+			}
+			h.batchTaskManager.SetLastRunError(queueID, lastRunErr)
 			h.batchTaskManager.UpdateQueueStatus(queueID, "completed")
 			h.logger.Info("批量任务队列执行完成", zap.String("queueId", queueID))
 			break
@@ -1918,7 +2104,13 @@ func (h *AgentHandler) executeBatchQueue(queueID string) {
 		h.batchTaskManager.SetTaskCancel(queueID, cancel)
 		// 使用队列配置的角色工具列表（如果为空，表示使用所有工具）
 		// 注意：skills不会硬编码注入，但会在系统提示词中提示AI这个角色推荐使用哪些skills
-		useBatchMulti := h.config != nil && h.config.MultiAgent.Enabled && h.config.MultiAgent.BatchUseMultiAgent
+		useBatchMulti := false
+		if queue.AgentMode == "multi" {
+			useBatchMulti = h.config != nil && h.config.MultiAgent.Enabled
+		} else if queue.AgentMode == "" {
+			// 兼容历史数据：未配置队列代理模式时，沿用旧的系统级开关
+			useBatchMulti = h.config != nil && h.config.MultiAgent.Enabled && h.config.MultiAgent.BatchUseMultiAgent
+		}
 		var result *agent.AgentLoopResult
 		var resultMA *multiagent.RunResult
 		var runErr error

@@ -11,14 +11,14 @@ const (
 	ToolSearchKnowledgeBase    = "search_knowledge_base"
 
 	// Skills工具
-	ToolListSkills    = "list_skills"
-	ToolReadSkill     = "read_skill"
+	ToolListSkills = "list_skills"
+	ToolReadSkill  = "read_skill"
 
 	// WebShell 助手工具（AI 在 WebShell 管理 - AI 助手 中使用）
-	ToolWebshellExec       = "webshell_exec"
-	ToolWebshellFileList   = "webshell_file_list"
-	ToolWebshellFileRead   = "webshell_file_read"
-	ToolWebshellFileWrite  = "webshell_file_write"
+	ToolWebshellExec      = "webshell_exec"
+	ToolWebshellFileList  = "webshell_file_list"
+	ToolWebshellFileRead  = "webshell_file_read"
+	ToolWebshellFileWrite = "webshell_file_write"
 
 	// WebShell 连接管理工具（用于通过 MCP 管理 webshell 连接）
 	ToolManageWebshellList   = "manage_webshell_list"
@@ -26,6 +26,18 @@ const (
 	ToolManageWebshellUpdate = "manage_webshell_update"
 	ToolManageWebshellDelete = "manage_webshell_delete"
 	ToolManageWebshellTest   = "manage_webshell_test"
+
+	// 批量任务队列（与 Web 端批量任务一致，供模型创建/启停/查询队列）
+	ToolBatchTaskList            = "batch_task_list"
+	ToolBatchTaskGet             = "batch_task_get"
+	ToolBatchTaskCreate          = "batch_task_create"
+	ToolBatchTaskStart           = "batch_task_start"
+	ToolBatchTaskPause           = "batch_task_pause"
+	ToolBatchTaskDelete          = "batch_task_delete"
+	ToolBatchTaskScheduleEnabled = "batch_task_schedule_enabled"
+	ToolBatchTaskAdd             = "batch_task_add_task"
+	ToolBatchTaskUpdate          = "batch_task_update_task"
+	ToolBatchTaskRemove          = "batch_task_remove_task"
 )
 
 // IsBuiltinTool 检查工具名称是否是内置工具
@@ -44,7 +56,17 @@ func IsBuiltinTool(toolName string) bool {
 		ToolManageWebshellAdd,
 		ToolManageWebshellUpdate,
 		ToolManageWebshellDelete,
-		ToolManageWebshellTest:
+		ToolManageWebshellTest,
+		ToolBatchTaskList,
+		ToolBatchTaskGet,
+		ToolBatchTaskCreate,
+		ToolBatchTaskStart,
+		ToolBatchTaskPause,
+		ToolBatchTaskDelete,
+		ToolBatchTaskScheduleEnabled,
+		ToolBatchTaskAdd,
+		ToolBatchTaskUpdate,
+		ToolBatchTaskRemove:
 		return true
 	default:
 		return false
@@ -68,5 +90,15 @@ func GetAllBuiltinTools() []string {
 		ToolManageWebshellUpdate,
 		ToolManageWebshellDelete,
 		ToolManageWebshellTest,
+		ToolBatchTaskList,
+		ToolBatchTaskGet,
+		ToolBatchTaskCreate,
+		ToolBatchTaskStart,
+		ToolBatchTaskPause,
+		ToolBatchTaskDelete,
+		ToolBatchTaskScheduleEnabled,
+		ToolBatchTaskAdd,
+		ToolBatchTaskUpdate,
+		ToolBatchTaskRemove,
 	}
 }

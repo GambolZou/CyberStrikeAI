@@ -27,24 +27,32 @@ type BatchTask struct {
 
 // BatchTaskQueue 批量任务队列
 type BatchTaskQueue struct {
-	ID           string       `json:"id"`
-	Title        string       `json:"title,omitempty"`
-	Role         string       `json:"role,omitempty"` // 角色名称（空字符串表示默认角色）
-	Tasks        []*BatchTask `json:"tasks"`
-	Status       string       `json:"status"` // pending, running, paused, completed, cancelled
-	CreatedAt    time.Time    `json:"createdAt"`
-	StartedAt    *time.Time   `json:"startedAt,omitempty"`
-	CompletedAt  *time.Time   `json:"completedAt,omitempty"`
-	CurrentIndex int          `json:"currentIndex"`
-	mu           sync.RWMutex
+	ID                    string       `json:"id"`
+	Title                 string       `json:"title,omitempty"`
+	Role                  string       `json:"role,omitempty"` // 角色名称（空字符串表示默认角色）
+	AgentMode             string       `json:"agentMode"`      // single | multi
+	ScheduleMode          string       `json:"scheduleMode"`   // manual | cron
+	CronExpr              string       `json:"cronExpr,omitempty"`
+	NextRunAt             *time.Time   `json:"nextRunAt,omitempty"`
+	ScheduleEnabled       bool         `json:"scheduleEnabled"`
+	LastScheduleTriggerAt *time.Time   `json:"lastScheduleTriggerAt,omitempty"`
+	LastScheduleError     string       `json:"lastScheduleError,omitempty"`
+	LastRunError          string       `json:"lastRunError,omitempty"`
+	Tasks                 []*BatchTask `json:"tasks"`
+	Status                string       `json:"status"` // pending, running, paused, completed, cancelled
+	CreatedAt             time.Time    `json:"createdAt"`
+	StartedAt             *time.Time   `json:"startedAt,omitempty"`
+	CompletedAt           *time.Time   `json:"completedAt,omitempty"`
+	CurrentIndex          int          `json:"currentIndex"`
+	mu                    sync.RWMutex
 }
 
 // BatchTaskManager 批量任务管理器
 type BatchTaskManager struct {
-	db            *database.DB
-	queues        map[string]*BatchTaskQueue
-	taskCancels   map[string]context.CancelFunc // 存储每个队列当前任务的取消函数
-	mu            sync.RWMutex
+	db          *database.DB
+	queues      map[string]*BatchTaskQueue
+	taskCancels map[string]context.CancelFunc // 存储每个队列当前任务的取消函数
+	mu          sync.RWMutex
 }
 
 // NewBatchTaskManager 创建批量任务管理器
@@ -63,19 +71,32 @@ func (m *BatchTaskManager) SetDB(db *database.DB) {
 }
 
 // CreateBatchQueue 创建批量任务队列
-func (m *BatchTaskManager) CreateBatchQueue(title, role string, tasks []string) *BatchTaskQueue {
+func (m *BatchTaskManager) CreateBatchQueue(
+	title, role, agentMode, scheduleMode, cronExpr string,
+	nextRunAt *time.Time,
+	tasks []string,
+) *BatchTaskQueue {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	queueID := time.Now().Format("20060102150405") + "-" + generateShortID()
 	queue := &BatchTaskQueue{
-		ID:           queueID,
-		Title:        title,
-		Role:         role,
-		Tasks:        make([]*BatchTask, 0, len(tasks)),
-		Status:       "pending",
-		CreatedAt:    time.Now(),
-		CurrentIndex: 0,
+		ID:              queueID,
+		Title:           title,
+		Role:            role,
+		AgentMode:       normalizeBatchQueueAgentMode(agentMode),
+		ScheduleMode:    normalizeBatchQueueScheduleMode(scheduleMode),
+		CronExpr:        strings.TrimSpace(cronExpr),
+		NextRunAt:       nextRunAt,
+		ScheduleEnabled: true,
+		Tasks:           make([]*BatchTask, 0, len(tasks)),
+		Status:          "pending",
+		CreatedAt:       time.Now(),
+		CurrentIndex:    0,
+	}
+	if queue.ScheduleMode != "cron" {
+		queue.CronExpr = ""
+		queue.NextRunAt = nil
 	}
 
 	// 准备数据库保存的任务数据
@@ -100,7 +121,16 @@ func (m *BatchTaskManager) CreateBatchQueue(title, role string, tasks []string) 
 
 	// 保存到数据库
 	if m.db != nil {
-		if err := m.db.CreateBatchQueue(queueID, title, role, dbTasks); err != nil {
+		if err := m.db.CreateBatchQueue(
+			queueID,
+			title,
+			role,
+			queue.AgentMode,
+			queue.ScheduleMode,
+			queue.CronExpr,
+			queue.NextRunAt,
+			dbTasks,
+		); err != nil {
 			// 如果数据库保存失败，记录错误但继续（使用内存缓存）
 			// 这里可以添加日志记录
 		}
@@ -151,6 +181,8 @@ func (m *BatchTaskManager) loadQueueFromDB(queueID string) *BatchTaskQueue {
 
 	queue := &BatchTaskQueue{
 		ID:           queueRow.ID,
+		AgentMode:    "single",
+		ScheduleMode: "manual",
 		Status:       queueRow.Status,
 		CreatedAt:    queueRow.CreatedAt,
 		CurrentIndex: queueRow.CurrentIndex,
@@ -162,6 +194,33 @@ func (m *BatchTaskManager) loadQueueFromDB(queueID string) *BatchTaskQueue {
 	}
 	if queueRow.Role.Valid {
 		queue.Role = queueRow.Role.String
+	}
+	if queueRow.AgentMode.Valid {
+		queue.AgentMode = normalizeBatchQueueAgentMode(queueRow.AgentMode.String)
+	}
+	if queueRow.ScheduleMode.Valid {
+		queue.ScheduleMode = normalizeBatchQueueScheduleMode(queueRow.ScheduleMode.String)
+	}
+	if queueRow.CronExpr.Valid && queue.ScheduleMode == "cron" {
+		queue.CronExpr = strings.TrimSpace(queueRow.CronExpr.String)
+	}
+	if queueRow.NextRunAt.Valid && queue.ScheduleMode == "cron" {
+		t := queueRow.NextRunAt.Time
+		queue.NextRunAt = &t
+	}
+	queue.ScheduleEnabled = true
+	if queueRow.ScheduleEnabled.Valid && queueRow.ScheduleEnabled.Int64 == 0 {
+		queue.ScheduleEnabled = false
+	}
+	if queueRow.LastScheduleTriggerAt.Valid {
+		t := queueRow.LastScheduleTriggerAt.Time
+		queue.LastScheduleTriggerAt = &t
+	}
+	if queueRow.LastScheduleError.Valid {
+		queue.LastScheduleError = strings.TrimSpace(queueRow.LastScheduleError.String)
+	}
+	if queueRow.LastRunError.Valid {
+		queue.LastRunError = strings.TrimSpace(queueRow.LastRunError.String)
 	}
 	if queueRow.StartedAt.Valid {
 		queue.StartedAt = &queueRow.StartedAt.Time
@@ -347,6 +406,8 @@ func (m *BatchTaskManager) LoadFromDB() error {
 
 		queue := &BatchTaskQueue{
 			ID:           queueRow.ID,
+			AgentMode:    "single",
+			ScheduleMode: "manual",
 			Status:       queueRow.Status,
 			CreatedAt:    queueRow.CreatedAt,
 			CurrentIndex: queueRow.CurrentIndex,
@@ -358,6 +419,33 @@ func (m *BatchTaskManager) LoadFromDB() error {
 		}
 		if queueRow.Role.Valid {
 			queue.Role = queueRow.Role.String
+		}
+		if queueRow.AgentMode.Valid {
+			queue.AgentMode = normalizeBatchQueueAgentMode(queueRow.AgentMode.String)
+		}
+		if queueRow.ScheduleMode.Valid {
+			queue.ScheduleMode = normalizeBatchQueueScheduleMode(queueRow.ScheduleMode.String)
+		}
+		if queueRow.CronExpr.Valid && queue.ScheduleMode == "cron" {
+			queue.CronExpr = strings.TrimSpace(queueRow.CronExpr.String)
+		}
+		if queueRow.NextRunAt.Valid && queue.ScheduleMode == "cron" {
+			t := queueRow.NextRunAt.Time
+			queue.NextRunAt = &t
+		}
+		queue.ScheduleEnabled = true
+		if queueRow.ScheduleEnabled.Valid && queueRow.ScheduleEnabled.Int64 == 0 {
+			queue.ScheduleEnabled = false
+		}
+		if queueRow.LastScheduleTriggerAt.Valid {
+			t := queueRow.LastScheduleTriggerAt.Time
+			queue.LastScheduleTriggerAt = &t
+		}
+		if queueRow.LastScheduleError.Valid {
+			queue.LastScheduleError = strings.TrimSpace(queueRow.LastScheduleError.String)
+		}
+		if queueRow.LastRunError.Valid {
+			queue.LastRunError = strings.TrimSpace(queueRow.LastRunError.String)
 		}
 		if queueRow.StartedAt.Valid {
 			queue.StartedAt = &queueRow.StartedAt.Time
@@ -467,6 +555,127 @@ func (m *BatchTaskManager) UpdateQueueStatus(queueID, status string) {
 			// 记录错误但继续（使用内存缓存）
 		}
 	}
+}
+
+// UpdateQueueSchedule 更新队列调度配置
+func (m *BatchTaskManager) UpdateQueueSchedule(queueID, scheduleMode, cronExpr string, nextRunAt *time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	queue, exists := m.queues[queueID]
+	if !exists {
+		return
+	}
+
+	queue.ScheduleMode = normalizeBatchQueueScheduleMode(scheduleMode)
+	if queue.ScheduleMode == "cron" {
+		queue.CronExpr = strings.TrimSpace(cronExpr)
+		queue.NextRunAt = nextRunAt
+	} else {
+		queue.CronExpr = ""
+		queue.NextRunAt = nil
+	}
+
+	if m.db != nil {
+		if err := m.db.UpdateBatchQueueSchedule(queueID, queue.ScheduleMode, queue.CronExpr, queue.NextRunAt); err != nil {
+			// 记录错误但继续（使用内存缓存）
+		}
+	}
+}
+
+// SetScheduleEnabled 暂停/恢复 Cron 自动调度（不影响手工执行）
+func (m *BatchTaskManager) SetScheduleEnabled(queueID string, enabled bool) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	queue, exists := m.queues[queueID]
+	if !exists {
+		return false
+	}
+	queue.ScheduleEnabled = enabled
+	if m.db != nil {
+		_ = m.db.UpdateBatchQueueScheduleEnabled(queueID, enabled)
+	}
+	return true
+}
+
+// RecordScheduledRunStart Cron 触发成功、即将执行子任务时调用
+func (m *BatchTaskManager) RecordScheduledRunStart(queueID string) {
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	queue, exists := m.queues[queueID]
+	if !exists {
+		return
+	}
+	queue.LastScheduleTriggerAt = &now
+	queue.LastScheduleError = ""
+	if m.db != nil {
+		_ = m.db.RecordBatchQueueScheduledTriggerStart(queueID, now)
+	}
+}
+
+// SetLastScheduleError 调度层失败（未成功开始执行）
+func (m *BatchTaskManager) SetLastScheduleError(queueID, msg string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	queue, exists := m.queues[queueID]
+	if !exists {
+		return
+	}
+	queue.LastScheduleError = strings.TrimSpace(msg)
+	if m.db != nil {
+		_ = m.db.SetBatchQueueLastScheduleError(queueID, queue.LastScheduleError)
+	}
+}
+
+// SetLastRunError 最近一轮批量执行中的失败摘要
+func (m *BatchTaskManager) SetLastRunError(queueID, msg string) {
+	msg = strings.TrimSpace(msg)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	queue, exists := m.queues[queueID]
+	if !exists {
+		return
+	}
+	queue.LastRunError = msg
+	if m.db != nil {
+		_ = m.db.SetBatchQueueLastRunError(queueID, msg)
+	}
+}
+
+// ResetQueueForRerun 重置队列与子任务状态，供 cron 下一轮执行
+func (m *BatchTaskManager) ResetQueueForRerun(queueID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	queue, exists := m.queues[queueID]
+	if !exists {
+		return false
+	}
+	queue.Status = "pending"
+	queue.CurrentIndex = 0
+	queue.StartedAt = nil
+	queue.CompletedAt = nil
+	queue.NextRunAt = nil
+	for _, task := range queue.Tasks {
+		task.Status = "pending"
+		task.ConversationID = ""
+		task.StartedAt = nil
+		task.CompletedAt = nil
+		task.Error = ""
+		task.Result = ""
+	}
+
+	if m.db != nil {
+		if err := m.db.ResetBatchQueueForRerun(queueID); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // UpdateTaskMessage 更新任务消息（仅限待执行状态）

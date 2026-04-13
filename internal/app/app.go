@@ -404,6 +404,13 @@ func New(cfg *config.Config, log *logger.Logger) (*App, error) {
 	}
 	configHandler.SetSkillsToolRegistrar(skillsRegistrar)
 
+	handler.RegisterBatchTaskMCPTools(mcpServer, agentHandler, log.Logger)
+	batchTaskToolRegistrar := func() error {
+		handler.RegisterBatchTaskMCPTools(mcpServer, agentHandler, log.Logger)
+		return nil
+	}
+	configHandler.SetBatchTaskToolRegistrar(batchTaskToolRegistrar)
+
 	// 设置知识库初始化器（用于动态初始化，需要在 App 创建后设置）
 	configHandler.SetKnowledgeInitializer(func() (*handler.KnowledgeHandler, error) {
 		knowledgeHandler, err := initializeKnowledge(cfg, db, knowledgeDBConn, mcpServer, agentHandler, app, log.Logger)
@@ -652,6 +659,7 @@ func setupRoutes(
 		protected.GET("/batch-tasks/:queueId", agentHandler.GetBatchQueue)
 		protected.POST("/batch-tasks/:queueId/start", agentHandler.StartBatchQueue)
 		protected.POST("/batch-tasks/:queueId/pause", agentHandler.PauseBatchQueue)
+		protected.PUT("/batch-tasks/:queueId/schedule-enabled", agentHandler.SetBatchQueueScheduleEnabled)
 		protected.DELETE("/batch-tasks/:queueId", agentHandler.DeleteBatchQueue)
 		protected.PUT("/batch-tasks/:queueId/tasks/:taskId", agentHandler.UpdateBatchTask)
 		protected.POST("/batch-tasks/:queueId/tasks", agentHandler.AddBatchTask)
@@ -1333,8 +1341,8 @@ func registerWebshellManagementTools(mcpServer *mcp.Server, db *database.DB, web
 
 	// manage_webshell_add - 添加新的 webshell 连接
 	addTool := mcp.Tool{
-		Name:        builtin.ToolManageWebshellAdd,
-		Description: "添加新的 WebShell 连接到管理系统。支持 PHP、ASP、ASPX、JSP 等类型的一句话木马。",
+		Name:             builtin.ToolManageWebshellAdd,
+		Description:      "添加新的 WebShell 连接到管理系统。支持 PHP、ASP、ASPX、JSP 等类型的一句话木马。",
 		ShortDescription: "添加 WebShell 连接",
 		InputSchema: map[string]interface{}{
 			"type": "object",
@@ -1425,8 +1433,8 @@ func registerWebshellManagementTools(mcpServer *mcp.Server, db *database.DB, web
 
 	// manage_webshell_update - 更新 webshell 连接
 	updateTool := mcp.Tool{
-		Name:        builtin.ToolManageWebshellUpdate,
-		Description: "更新已存在的 WebShell 连接信息。",
+		Name:             builtin.ToolManageWebshellUpdate,
+		Description:      "更新已存在的 WebShell 连接信息。",
 		ShortDescription: "更新 WebShell 连接",
 		InputSchema: map[string]interface{}{
 			"type": "object",
@@ -1522,8 +1530,8 @@ func registerWebshellManagementTools(mcpServer *mcp.Server, db *database.DB, web
 
 	// manage_webshell_delete - 删除 webshell 连接
 	deleteTool := mcp.Tool{
-		Name:        builtin.ToolManageWebshellDelete,
-		Description: "删除指定的 WebShell 连接。",
+		Name:             builtin.ToolManageWebshellDelete,
+		Description:      "删除指定的 WebShell 连接。",
 		ShortDescription: "删除 WebShell 连接",
 		InputSchema: map[string]interface{}{
 			"type": "object",
@@ -1564,8 +1572,8 @@ func registerWebshellManagementTools(mcpServer *mcp.Server, db *database.DB, web
 
 	// manage_webshell_test - 测试 webshell 连接
 	testTool := mcp.Tool{
-		Name:        builtin.ToolManageWebshellTest,
-		Description: "测试指定的 WebShell 连接是否可用，会尝试执行一个简单的命令（如 whoami 或 dir）。",
+		Name:             builtin.ToolManageWebshellTest,
+		Description:      "测试指定的 WebShell 连接是否可用，会尝试执行一个简单的命令（如 whoami 或 dir）。",
 		ShortDescription: "测试 WebShell 连接",
 		InputSchema: map[string]interface{}{
 			"type": "object",

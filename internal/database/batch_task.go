@@ -3,6 +3,7 @@ package database
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -10,14 +11,22 @@ import (
 
 // BatchTaskQueueRow 批量任务队列数据库行
 type BatchTaskQueueRow struct {
-	ID           string
-	Title        sql.NullString
-	Role         sql.NullString
-	Status       string
-	CreatedAt    time.Time
-	StartedAt    sql.NullTime
-	CompletedAt  sql.NullTime
-	CurrentIndex int
+	ID                    string
+	Title                 sql.NullString
+	Role                  sql.NullString
+	AgentMode             sql.NullString
+	ScheduleMode          sql.NullString
+	CronExpr              sql.NullString
+	NextRunAt             sql.NullTime
+	ScheduleEnabled       sql.NullInt64
+	LastScheduleTriggerAt sql.NullTime
+	LastScheduleError     sql.NullString
+	LastRunError          sql.NullString
+	Status                string
+	CreatedAt             time.Time
+	StartedAt             sql.NullTime
+	CompletedAt           sql.NullTime
+	CurrentIndex          int
 }
 
 // BatchTaskRow 批量任务数据库行
@@ -34,7 +43,16 @@ type BatchTaskRow struct {
 }
 
 // CreateBatchQueue 创建批量任务队列
-func (db *DB) CreateBatchQueue(queueID string, title string, role string, tasks []map[string]interface{}) error {
+func (db *DB) CreateBatchQueue(
+	queueID string,
+	title string,
+	role string,
+	agentMode string,
+	scheduleMode string,
+	cronExpr string,
+	nextRunAt *time.Time,
+	tasks []map[string]interface{},
+) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("开始事务失败: %w", err)
@@ -42,9 +60,14 @@ func (db *DB) CreateBatchQueue(queueID string, title string, role string, tasks 
 	defer tx.Rollback()
 
 	now := time.Now()
+	var nextRunAtValue interface{}
+	if nextRunAt != nil {
+		nextRunAtValue = *nextRunAt
+	}
+
 	_, err = tx.Exec(
-		"INSERT INTO batch_task_queues (id, title, role, status, created_at, current_index) VALUES (?, ?, ?, ?, ?, ?)",
-		queueID, title, role, "pending", now, 0,
+		"INSERT INTO batch_task_queues (id, title, role, agent_mode, schedule_mode, cron_expr, next_run_at, schedule_enabled, status, created_at, current_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		queueID, title, role, agentMode, scheduleMode, cronExpr, nextRunAtValue, 1, "pending", now, 0,
 	)
 	if err != nil {
 		return fmt.Errorf("创建批量任务队列失败: %w", err)
@@ -60,7 +83,7 @@ func (db *DB) CreateBatchQueue(queueID string, title string, role string, tasks 
 		if !ok {
 			continue
 		}
-		
+
 		_, err = tx.Exec(
 			"INSERT INTO batch_tasks (id, queue_id, message, status) VALUES (?, ?, ?, ?)",
 			taskID, queueID, message, "pending",
@@ -78,9 +101,9 @@ func (db *DB) GetBatchQueue(queueID string) (*BatchTaskQueueRow, error) {
 	var row BatchTaskQueueRow
 	var createdAt string
 	err := db.QueryRow(
-		"SELECT id, title, role, status, created_at, started_at, completed_at, current_index FROM batch_task_queues WHERE id = ?",
+		"SELECT id, title, role, agent_mode, schedule_mode, cron_expr, next_run_at, schedule_enabled, last_schedule_trigger_at, last_schedule_error, last_run_error, status, created_at, started_at, completed_at, current_index FROM batch_task_queues WHERE id = ?",
 		queueID,
-	).Scan(&row.ID, &row.Title, &row.Role, &row.Status, &createdAt, &row.StartedAt, &row.CompletedAt, &row.CurrentIndex)
+	).Scan(&row.ID, &row.Title, &row.Role, &row.AgentMode, &row.ScheduleMode, &row.CronExpr, &row.NextRunAt, &row.ScheduleEnabled, &row.LastScheduleTriggerAt, &row.LastScheduleError, &row.LastRunError, &row.Status, &createdAt, &row.StartedAt, &row.CompletedAt, &row.CurrentIndex)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -104,7 +127,7 @@ func (db *DB) GetBatchQueue(queueID string) (*BatchTaskQueueRow, error) {
 // GetAllBatchQueues 获取所有批量任务队列
 func (db *DB) GetAllBatchQueues() ([]*BatchTaskQueueRow, error) {
 	rows, err := db.Query(
-		"SELECT id, title, role, status, created_at, started_at, completed_at, current_index FROM batch_task_queues ORDER BY created_at DESC",
+		"SELECT id, title, role, agent_mode, schedule_mode, cron_expr, next_run_at, schedule_enabled, last_schedule_trigger_at, last_schedule_error, last_run_error, status, created_at, started_at, completed_at, current_index FROM batch_task_queues ORDER BY created_at DESC",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("查询批量任务队列列表失败: %w", err)
@@ -115,7 +138,7 @@ func (db *DB) GetAllBatchQueues() ([]*BatchTaskQueueRow, error) {
 	for rows.Next() {
 		var row BatchTaskQueueRow
 		var createdAt string
-		if err := rows.Scan(&row.ID, &row.Title, &row.Role, &row.Status, &createdAt, &row.StartedAt, &row.CompletedAt, &row.CurrentIndex); err != nil {
+		if err := rows.Scan(&row.ID, &row.Title, &row.Role, &row.AgentMode, &row.ScheduleMode, &row.CronExpr, &row.NextRunAt, &row.ScheduleEnabled, &row.LastScheduleTriggerAt, &row.LastScheduleError, &row.LastRunError, &row.Status, &createdAt, &row.StartedAt, &row.CompletedAt, &row.CurrentIndex); err != nil {
 			return nil, fmt.Errorf("扫描批量任务队列失败: %w", err)
 		}
 		parsedTime, parseErr := time.Parse("2006-01-02 15:04:05", createdAt)
@@ -135,7 +158,7 @@ func (db *DB) GetAllBatchQueues() ([]*BatchTaskQueueRow, error) {
 
 // ListBatchQueues 列出批量任务队列（支持筛选和分页）
 func (db *DB) ListBatchQueues(limit, offset int, status, keyword string) ([]*BatchTaskQueueRow, error) {
-	query := "SELECT id, title, role, status, created_at, started_at, completed_at, current_index FROM batch_task_queues WHERE 1=1"
+	query := "SELECT id, title, role, agent_mode, schedule_mode, cron_expr, next_run_at, schedule_enabled, last_schedule_trigger_at, last_schedule_error, last_run_error, status, created_at, started_at, completed_at, current_index FROM batch_task_queues WHERE 1=1"
 	args := []interface{}{}
 
 	// 状态筛选
@@ -163,7 +186,7 @@ func (db *DB) ListBatchQueues(limit, offset int, status, keyword string) ([]*Bat
 	for rows.Next() {
 		var row BatchTaskQueueRow
 		var createdAt string
-		if err := rows.Scan(&row.ID, &row.Title, &row.Role, &row.Status, &createdAt, &row.StartedAt, &row.CompletedAt, &row.CurrentIndex); err != nil {
+		if err := rows.Scan(&row.ID, &row.Title, &row.Role, &row.AgentMode, &row.ScheduleMode, &row.CronExpr, &row.NextRunAt, &row.ScheduleEnabled, &row.LastScheduleTriggerAt, &row.LastScheduleError, &row.LastRunError, &row.Status, &createdAt, &row.StartedAt, &row.CompletedAt, &row.CurrentIndex); err != nil {
 			return nil, fmt.Errorf("扫描批量任务队列失败: %w", err)
 		}
 		parsedTime, parseErr := time.Parse("2006-01-02 15:04:05", createdAt)
@@ -237,7 +260,7 @@ func (db *DB) GetBatchTasks(queueID string) ([]*BatchTaskRow, error) {
 func (db *DB) UpdateBatchQueueStatus(queueID, status string) error {
 	var err error
 	now := time.Now()
-	
+
 	if status == "running" {
 		_, err = db.Exec(
 			"UPDATE batch_task_queues SET status = ?, started_at = COALESCE(started_at, ?) WHERE id = ?",
@@ -254,7 +277,7 @@ func (db *DB) UpdateBatchQueueStatus(queueID, status string) error {
 			status, queueID,
 		)
 	}
-	
+
 	if err != nil {
 		return fmt.Errorf("更新批量任务队列状态失败: %w", err)
 	}
@@ -265,41 +288,41 @@ func (db *DB) UpdateBatchQueueStatus(queueID, status string) error {
 func (db *DB) UpdateBatchTaskStatus(queueID, taskID, status string, conversationID, result, errorMsg string) error {
 	var err error
 	now := time.Now()
-	
+
 	// 构建更新语句
 	var updates []string
 	var args []interface{}
-	
+
 	updates = append(updates, "status = ?")
 	args = append(args, status)
-	
+
 	if conversationID != "" {
 		updates = append(updates, "conversation_id = ?")
 		args = append(args, conversationID)
 	}
-	
+
 	if result != "" {
 		updates = append(updates, "result = ?")
 		args = append(args, result)
 	}
-	
+
 	if errorMsg != "" {
 		updates = append(updates, "error = ?")
 		args = append(args, errorMsg)
 	}
-	
+
 	if status == "running" {
 		updates = append(updates, "started_at = COALESCE(started_at, ?)")
 		args = append(args, now)
 	}
-	
+
 	if status == "completed" || status == "failed" || status == "cancelled" {
 		updates = append(updates, "completed_at = COALESCE(completed_at, ?)")
 		args = append(args, now)
 	}
-	
+
 	args = append(args, queueID, taskID)
-	
+
 	// 构建SQL语句
 	sql := "UPDATE batch_tasks SET "
 	for i, update := range updates {
@@ -309,7 +332,7 @@ func (db *DB) UpdateBatchTaskStatus(queueID, taskID, status string, conversation
 		sql += update
 	}
 	sql += " WHERE queue_id = ? AND id = ?"
-	
+
 	_, err = db.Exec(sql, args...)
 	if err != nil {
 		return fmt.Errorf("更新批量任务状态失败: %w", err)
@@ -327,6 +350,107 @@ func (db *DB) UpdateBatchQueueCurrentIndex(queueID string, currentIndex int) err
 		return fmt.Errorf("更新批量任务队列当前索引失败: %w", err)
 	}
 	return nil
+}
+
+// UpdateBatchQueueSchedule 更新批量任务队列调度相关信息
+func (db *DB) UpdateBatchQueueSchedule(queueID, scheduleMode, cronExpr string, nextRunAt *time.Time) error {
+	var nextRunAtValue interface{}
+	if nextRunAt != nil {
+		nextRunAtValue = *nextRunAt
+	}
+	_, err := db.Exec(
+		"UPDATE batch_task_queues SET schedule_mode = ?, cron_expr = ?, next_run_at = ? WHERE id = ?",
+		scheduleMode, cronExpr, nextRunAtValue, queueID,
+	)
+	if err != nil {
+		return fmt.Errorf("更新批量任务调度配置失败: %w", err)
+	}
+	return nil
+}
+
+// UpdateBatchQueueScheduleEnabled 是否允许 Cron 自动触发（手工「开始执行」不受影响）
+func (db *DB) UpdateBatchQueueScheduleEnabled(queueID string, enabled bool) error {
+	v := 0
+	if enabled {
+		v = 1
+	}
+	_, err := db.Exec(
+		"UPDATE batch_task_queues SET schedule_enabled = ? WHERE id = ?",
+		v, queueID,
+	)
+	if err != nil {
+		return fmt.Errorf("更新批量任务调度开关失败: %w", err)
+	}
+	return nil
+}
+
+// RecordBatchQueueScheduledTriggerStart 记录一次由调度触发的开始时间并清空调度层错误
+func (db *DB) RecordBatchQueueScheduledTriggerStart(queueID string, at time.Time) error {
+	_, err := db.Exec(
+		"UPDATE batch_task_queues SET last_schedule_trigger_at = ?, last_schedule_error = NULL WHERE id = ?",
+		at, queueID,
+	)
+	if err != nil {
+		return fmt.Errorf("记录调度触发时间失败: %w", err)
+	}
+	return nil
+}
+
+// SetBatchQueueLastScheduleError 调度启动失败等原因（如状态不允许、重置失败）
+func (db *DB) SetBatchQueueLastScheduleError(queueID, msg string) error {
+	_, err := db.Exec(
+		"UPDATE batch_task_queues SET last_schedule_error = ? WHERE id = ?",
+		msg, queueID,
+	)
+	if err != nil {
+		return fmt.Errorf("写入调度错误信息失败: %w", err)
+	}
+	return nil
+}
+
+// SetBatchQueueLastRunError 最近一轮执行中出现的子任务失败摘要（空串表示清空）
+func (db *DB) SetBatchQueueLastRunError(queueID, msg string) error {
+	var v interface{}
+	if strings.TrimSpace(msg) == "" {
+		v = nil
+	} else {
+		v = msg
+	}
+	_, err := db.Exec(
+		"UPDATE batch_task_queues SET last_run_error = ? WHERE id = ?",
+		v, queueID,
+	)
+	if err != nil {
+		return fmt.Errorf("写入最近运行错误失败: %w", err)
+	}
+	return nil
+}
+
+// ResetBatchQueueForRerun 重置队列和任务状态用于下一轮调度执行
+func (db *DB) ResetBatchQueueForRerun(queueID string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("开始事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(
+		"UPDATE batch_task_queues SET status = ?, current_index = 0, started_at = NULL, completed_at = NULL WHERE id = ?",
+		"pending", queueID,
+	)
+	if err != nil {
+		return fmt.Errorf("重置批量任务队列状态失败: %w", err)
+	}
+
+	_, err = tx.Exec(
+		"UPDATE batch_tasks SET status = ?, conversation_id = NULL, started_at = NULL, completed_at = NULL, error = NULL, result = NULL WHERE queue_id = ?",
+		"pending", queueID,
+	)
+	if err != nil {
+		return fmt.Errorf("重置批量任务状态失败: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // UpdateBatchTaskMessage 更新批量任务消息
@@ -387,4 +511,3 @@ func (db *DB) DeleteBatchQueue(queueID string) error {
 
 	return tx.Commit()
 }
-
