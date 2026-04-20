@@ -213,19 +213,6 @@ func RunDeepAgent(
 					if len(roleTools) == 0 && len(r.Tools) > 0 {
 						roleTools = r.Tools
 					}
-					if len(r.Skills) > 0 {
-						var b strings.Builder
-						b.WriteString(instr)
-						b.WriteString("\n\n本角色推荐优先通过 Eino `skill` 工具（渐进式披露）加载的技能包 name：")
-						for i, s := range r.Skills {
-							if i > 0 {
-								b.WriteString("、")
-							}
-							b.WriteString(s)
-						}
-						b.WriteString("。")
-						instr = b.String()
-					}
 				}
 			}
 

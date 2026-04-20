@@ -36,7 +36,6 @@ func RunEinoSingleChatModelAgent(
 	userMessage string,
 	history []agent.ChatMessage,
 	roleTools []string,
-	roleSkills []string,
 	progress func(eventType, message string, data interface{}),
 ) (*RunResult, error) {
 	if appCfg == nil || ag == nil {
@@ -169,7 +168,7 @@ func RunEinoSingleChatModelAgent(
 	chatCfg := &adk.ChatModelAgentConfig{
 		Name:          einoSingleAgentName,
 		Description:   "Eino ADK ChatModelAgent with MCP tools for authorized security testing.",
-		Instruction:   ag.EinoSingleAgentSystemInstruction(roleSkills),
+		Instruction:   ag.EinoSingleAgentSystemInstruction(),
 		Model:         mainModel,
 		ToolsConfig:   mainToolsCfg,
 		MaxIterations: maxIter,

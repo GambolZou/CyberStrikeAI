@@ -120,7 +120,7 @@ type MultiAgentSubConfig struct {
 	Name          string   `yaml:"name" json:"name"`
 	Description   string   `yaml:"description" json:"description"`
 	Instruction   string   `yaml:"instruction" json:"instruction"`
-	BindRole      string   `yaml:"bind_role,omitempty" json:"bind_role,omitempty"` // 可选：关联主配置 roles 中的角色名；未配 role_tools 时沿用该角色的 tools，并把 skills 写入指令提示
+	BindRole      string   `yaml:"bind_role,omitempty" json:"bind_role,omitempty"` // 可选：关联主配置 roles 中的角色名；未配 role_tools 时沿用该角色的 tools
 	RoleTools     []string `yaml:"role_tools" json:"role_tools"`                   // 与单 Agent 角色工具相同 key；空表示全部工具（bind_role 可补全 tools）
 	MaxIterations int      `yaml:"max_iterations" json:"max_iterations"`
 	Kind          string   `yaml:"kind,omitempty" json:"kind,omitempty"` // 仅 Markdown：kind=orchestrator 表示 Deep 主代理（与 orchestrator.md 二选一约定）
@@ -933,8 +933,7 @@ type RoleConfig struct {
 	Description string   `yaml:"description" json:"description"`           // 角色描述
 	UserPrompt  string   `yaml:"user_prompt" json:"user_prompt"`           // 用户提示词(追加到用户消息前)
 	Icon        string   `yaml:"icon,omitempty" json:"icon,omitempty"`     // 角色图标（可选）
-	Tools       []string `yaml:"tools,omitempty" json:"tools,omitempty"`   // 关联的工具列表（toolKey格式，如 "toolName" 或 "mcpName::toolName"）
-	MCPs        []string `yaml:"mcps,omitempty" json:"mcps,omitempty"`     // 向后兼容：关联的MCP服务器列表（已废弃，使用tools替代）
-	Skills      []string `yaml:"skills,omitempty" json:"skills,omitempty"` // 关联的skills列表（skill名称列表，在执行任务前会读取这些skills的内容）
-	Enabled     bool     `yaml:"enabled" json:"enabled"`                   // 是否启用
+	Tools       []string `yaml:"tools,omitempty" json:"tools,omitempty"` // 关联的工具列表（toolKey格式，如 "toolName" 或 "mcpName::toolName"）
+	MCPs        []string `yaml:"mcps,omitempty" json:"mcps,omitempty"`   // 向后兼容：关联的MCP服务器列表（已废弃，使用tools替代）
+	Enabled     bool     `yaml:"enabled" json:"enabled"`                 // 是否启用
 }
