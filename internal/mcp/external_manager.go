@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cyberstrike-ai/internal/config"
@@ -29,6 +30,7 @@ type ExternalMCPManager struct {
 	toolCacheMu  sync.RWMutex              // 工具列表缓存的锁
 	stopRefresh  chan struct{}             // 停止后台刷新的信号
 	refreshWg    sync.WaitGroup            // 等待后台刷新goroutine完成
+	refreshing   atomic.Bool               // 防止 refreshToolCounts 并发堆积
 	mu           sync.RWMutex
 }
 
@@ -721,7 +723,13 @@ func (m *ExternalMCPManager) GetToolCounts() map[string]int {
 }
 
 // refreshToolCounts 刷新工具数量缓存（后台异步执行）
+// 使用 atomic flag 防止并发堆积：如果上一次刷新尚未完成，本次触发直接跳过。
 func (m *ExternalMCPManager) refreshToolCounts() {
+	if !m.refreshing.CompareAndSwap(false, true) {
+		return // 上一次刷新尚未完成，跳过
+	}
+	defer m.refreshing.Store(false)
+
 	m.mu.RLock()
 	clients := make(map[string]ExternalMCPClient)
 	for k, v := range m.clients {
@@ -874,25 +882,10 @@ func (m *ExternalMCPManager) triggerToolCountRefresh() {
 
 // createClient 创建客户端（不连接）。统一使用官方 MCP Go SDK 的 lazy 客户端，连接在 Initialize 时完成。
 func (m *ExternalMCPManager) createClient(serverCfg config.ExternalMCPServerConfig) ExternalMCPClient {
-	transport := serverCfg.Transport
-	if transport == "" {
-		if serverCfg.Command != "" {
-			transport = "stdio"
-		} else if serverCfg.URL != "" {
-			transport = "http"
-		} else {
-			return nil
-		}
-	}
+	transport := serverCfg.GetTransportType()
 
 	switch transport {
 	case "http":
-		if serverCfg.URL == "" {
-			return nil
-		}
-		return newLazySDKClient(serverCfg, m.logger)
-	case "simple_http":
-		// 简单 HTTP（一次 POST 一次响应），用于自建 MCP 等
 		if serverCfg.URL == "" {
 			return nil
 		}
@@ -908,7 +901,11 @@ func (m *ExternalMCPManager) createClient(serverCfg config.ExternalMCPServerConf
 		}
 		return newLazySDKClient(serverCfg, m.logger)
 	default:
-		return nil
+		if transport == "" {
+			return nil
+		}
+		// 未知传输类型也尝试使用 lazy client
+		return newLazySDKClient(serverCfg, m.logger)
 	}
 }
 
@@ -990,20 +987,7 @@ func (m *ExternalMCPManager) connectClient(name string, serverCfg config.Externa
 
 // isEnabled 检查是否启用
 func (m *ExternalMCPManager) isEnabled(cfg config.ExternalMCPServerConfig) bool {
-	// 优先使用 ExternalMCPEnable 字段
-	// 如果没有设置，检查旧的 enabled/disabled 字段（向后兼容）
-	if cfg.ExternalMCPEnable {
-		return true
-	}
-	// 向后兼容：检查旧字段
-	if cfg.Disabled {
-		return false
-	}
-	if cfg.Enabled {
-		return true
-	}
-	// 都没有设置，默认为启用
-	return true
+	return cfg.ExternalMCPEnable
 }
 
 // findSubstring 查找子字符串（简单实现）
@@ -1044,15 +1028,7 @@ func (m *ExternalMCPManager) StartAllEnabled() {
 							zap.Error(err),
 						}
 
-						// 根据传输模式添加相应的信息
-						transport := c.Transport
-						if transport == "" {
-							if c.Command != "" {
-								transport = "stdio"
-							} else if c.URL != "" {
-								transport = "http"
-							}
-						}
+						transport := c.GetTransportType()
 
 						if transport == "http" && c.URL != "" {
 							fields = append(fields, zap.String("url", c.URL))

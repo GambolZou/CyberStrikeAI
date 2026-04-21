@@ -257,28 +257,52 @@ type ExternalMCPConfig struct {
 	Servers map[string]ExternalMCPServerConfig `yaml:"servers,omitempty" json:"servers,omitempty"`
 }
 
-// ExternalMCPServerConfig 外部MCP服务器配置
+// ExternalMCPServerConfig 外部MCP服务器配置（遵循官方 MCP 配置格式，兼容 Claude Desktop / Cursor / VS Code）。
+// 所有字符串字段均支持 ${VAR} 和 ${VAR:-default} 环境变量展开语法。
 type ExternalMCPServerConfig struct {
-	// stdio模式配置
+	// 传输类型: "stdio" | "sse" | "http"（Streamable HTTP）。
+	// stdio 模式可省略，有 command 字段时自动推断。
+	Type string `yaml:"type,omitempty" json:"type,omitempty"`
+
+	// stdio 模式配置
 	Command string            `yaml:"command,omitempty" json:"command,omitempty"`
 	Args    []string          `yaml:"args,omitempty" json:"args,omitempty"`
-	Env     map[string]string `yaml:"env,omitempty" json:"env,omitempty"` // 环境变量（用于stdio模式）
+	Env     map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 
-	// HTTP模式配置
-	Transport string            `yaml:"transport,omitempty" json:"transport,omitempty"` // "stdio" | "sse" | "http"(Streamable) | "simple_http"(自建/简单POST端点，如本机 http://127.0.0.1:8081/mcp)
-	URL       string            `yaml:"url,omitempty" json:"url,omitempty"`
-	Headers   map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"` // HTTP/SSE 请求头（如 x-api-key）
+	// HTTP/SSE 模式配置
+	URL     string            `yaml:"url,omitempty" json:"url,omitempty"`
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// 官方标准字段
+	Disabled    bool     `yaml:"disabled,omitempty" json:"disabled,omitempty"`       // 禁用服务器（官方字段）
+	AutoApprove []string `yaml:"autoApprove,omitempty" json:"autoApprove,omitempty"` // 自动批准的工具列表（官方字段）
+
+	// SDK 高级配置（对应 MCP Go SDK 传输层参数）
+	MaxRetries        int `yaml:"max_retries,omitempty" json:"max_retries,omitempty"`               // Streamable HTTP 断线重连次数（默认 5）
+	TerminateDuration int `yaml:"terminate_duration,omitempty" json:"terminate_duration,omitempty"` // stdio 进程优雅关闭等待秒数（默认 5）
+	KeepAlive         int `yaml:"keep_alive,omitempty" json:"keep_alive,omitempty"`                 // 客户端心跳间隔秒数（0 = 禁用）
 
 	// 通用配置
 	Description       string          `yaml:"description,omitempty" json:"description,omitempty"`
-	Timeout           int             `yaml:"timeout,omitempty" json:"timeout,omitempty"`                         // 超时时间（秒）
-	ExternalMCPEnable bool            `yaml:"external_mcp_enable,omitempty" json:"external_mcp_enable,omitempty"` // 是否启用外部MCP
-	ToolEnabled       map[string]bool `yaml:"tool_enabled,omitempty" json:"tool_enabled,omitempty"`               // 每个工具的启用状态（工具名称 -> 是否启用）
-
-	// 向后兼容字段（已废弃，保留用于读取旧配置）
-	Enabled  bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`   // 已废弃，使用 external_mcp_enable
-	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"` // 已废弃，使用 external_mcp_enable
+	Timeout           int             `yaml:"timeout,omitempty" json:"timeout,omitempty"`                         // 连接超时（秒）
+	ExternalMCPEnable bool            `yaml:"external_mcp_enable,omitempty" json:"external_mcp_enable,omitempty"` // 是否启用
+	ToolEnabled       map[string]bool `yaml:"tool_enabled,omitempty" json:"tool_enabled,omitempty"`               // 每个工具的启用状态
 }
+
+// GetTransportType 返回实际传输类型。优先读 Type，否则根据 Command/URL 自动推断。
+func (c ExternalMCPServerConfig) GetTransportType() string {
+	if c.Type != "" {
+		return c.Type
+	}
+	if c.Command != "" {
+		return "stdio"
+	}
+	if c.URL != "" {
+		return "http"
+	}
+	return ""
+}
+
 type ToolConfig struct {
 	Name             string            `yaml:"name"`
 	Command          string            `yaml:"command"`
@@ -369,23 +393,20 @@ func Load(path string) (*Config, error) {
 		cfg.Security.Tools = tools
 	}
 
-	// 迁移外部MCP配置：将旧的 enabled/disabled 字段迁移到 external_mcp_enable
+	// 外部 MCP：迁移 + 环境变量展开
 	if cfg.ExternalMCP.Servers != nil {
 		for name, serverCfg := range cfg.ExternalMCP.Servers {
-			// 如果已经设置了 external_mcp_enable，跳过迁移
-			// 否则从 enabled/disabled 字段迁移
-			// 注意：由于 ExternalMCPEnable 是 bool 类型，零值为 false，所以需要检查是否真的设置了
-			// 这里我们通过检查旧的 enabled/disabled 字段来判断是否需要迁移
+			// 官方 disabled 字段 → ExternalMCPEnable
 			if serverCfg.Disabled {
-				// 旧配置使用 disabled，迁移到 external_mcp_enable
 				serverCfg.ExternalMCPEnable = false
-			} else if serverCfg.Enabled {
-				// 旧配置使用 enabled，迁移到 external_mcp_enable
-				serverCfg.ExternalMCPEnable = true
-			} else {
-				// 都没有设置，默认为启用
+			} else if !serverCfg.ExternalMCPEnable {
+				// 默认启用
 				serverCfg.ExternalMCPEnable = true
 			}
+
+			// 展开所有 ${VAR} / ${VAR:-default} 环境变量引用
+			ExpandConfigEnv(&serverCfg)
+
 			cfg.ExternalMCP.Servers[name] = serverCfg
 		}
 	}

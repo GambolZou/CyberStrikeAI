@@ -16,12 +16,11 @@ func TestExternalMCPManager_AddOrUpdateConfig(t *testing.T) {
 
 	// 测试添加stdio配置
 	stdioCfg := config.ExternalMCPServerConfig{
-		Command:     "python3",
-		Args:        []string{"/path/to/script.py"},
-		Transport:   "stdio",
-		Description: "Test stdio MCP",
-		Timeout:     30,
-		Enabled:     true,
+		Command:           "python3",
+		Args:              []string{"/path/to/script.py"},
+		Description:       "Test stdio MCP",
+		Timeout:           30,
+		ExternalMCPEnable: true,
 	}
 
 	err := manager.AddOrUpdateConfig("test-stdio", stdioCfg)
@@ -31,11 +30,11 @@ func TestExternalMCPManager_AddOrUpdateConfig(t *testing.T) {
 
 	// 测试添加HTTP配置
 	httpCfg := config.ExternalMCPServerConfig{
-		Transport:   "http",
-		URL:         "http://127.0.0.1:8081/mcp",
-		Description: "Test HTTP MCP",
-		Timeout:     30,
-		Enabled:     false,
+		Type:              "http",
+		URL:               "http://127.0.0.1:8081/mcp",
+		Description:       "Test HTTP MCP",
+		Timeout:           30,
+		ExternalMCPEnable: false,
 	}
 
 	err = manager.AddOrUpdateConfig("test-http", httpCfg)
@@ -64,8 +63,7 @@ func TestExternalMCPManager_RemoveConfig(t *testing.T) {
 
 	cfg := config.ExternalMCPServerConfig{
 		Command:   "python3",
-		Transport: "stdio",
-		Enabled:   false,
+		ExternalMCPEnable: false,
 	}
 
 	manager.AddOrUpdateConfig("test-remove", cfg)
@@ -89,18 +87,17 @@ func TestExternalMCPManager_GetStats(t *testing.T) {
 	// 添加多个配置
 	manager.AddOrUpdateConfig("enabled1", config.ExternalMCPServerConfig{
 		Command: "python3",
-		Enabled: true,
+		ExternalMCPEnable: true,
 	})
 
 	manager.AddOrUpdateConfig("enabled2", config.ExternalMCPServerConfig{
 		URL:     "http://127.0.0.1:8081/mcp",
-		Enabled: true,
+		ExternalMCPEnable: true,
 	})
 
 	manager.AddOrUpdateConfig("disabled1", config.ExternalMCPServerConfig{
 		Command:  "python3",
-		Enabled:  false,
-		Disabled: true, // 明确设置为禁用
+		ExternalMCPEnable: false,
 	})
 
 	stats := manager.GetStats()
@@ -126,11 +123,11 @@ func TestExternalMCPManager_LoadConfigs(t *testing.T) {
 		Servers: map[string]config.ExternalMCPServerConfig{
 			"loaded1": {
 				Command: "python3",
-				Enabled: true,
+				ExternalMCPEnable: true,
 			},
 			"loaded2": {
 				URL:     "http://127.0.0.1:8081/mcp",
-				Enabled: false,
+				ExternalMCPEnable: false,
 			},
 		},
 	}
@@ -156,7 +153,7 @@ func TestLazySDKClient_InitializeFails(t *testing.T) {
 	logger := zap.NewNop()
 	// 使用不存在的 HTTP 地址，Initialize 应失败
 	cfg := config.ExternalMCPServerConfig{
-		Transport: "http",
+		Type: "http",
 		URL:       "http://127.0.0.1:19999/nonexistent",
 		Timeout:   2,
 	}
@@ -180,8 +177,7 @@ func TestExternalMCPManager_StartStopClient(t *testing.T) {
 	// 添加一个禁用的配置
 	cfg := config.ExternalMCPServerConfig{
 		Command:   "python3",
-		Transport: "stdio",
-		Enabled:   false,
+		ExternalMCPEnable: false,
 	}
 
 	manager.AddOrUpdateConfig("test-start-stop", cfg)
@@ -200,7 +196,7 @@ func TestExternalMCPManager_StartStopClient(t *testing.T) {
 
 	// 验证配置已更新为禁用
 	configs := manager.GetConfigs()
-	if configs["test-start-stop"].Enabled {
+	if configs["test-start-stop"].ExternalMCPEnable {
 		t.Error("配置应该已被禁用")
 	}
 }

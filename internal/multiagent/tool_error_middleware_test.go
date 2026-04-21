@@ -53,7 +53,12 @@ func TestIsSoftRecoverableToolError(t *testing.T) {
 		{
 			name:     "unrelated network error",
 			err:      errors.New("connection refused"),
-			expected: false,
+			expected: true, // default-soft: non-cancel errors are recoverable
+		},
+		{
+			name:     "tool binary not installed",
+			err:      errors.New("[LocalFunc] failed to invoke tool, toolName=grep, err=ripgrep (rg) is not installed or not in PATH"),
+			expected: true,
 		},
 		{
 			name:     "context cancelled",
@@ -131,15 +136,16 @@ func TestSoftRecoveryToolCallMiddleware_PropagatesNonRecoverable(t *testing.T) {
 		return nil, origErr
 	}
 	wrapped := mw(next)
-	_, err := wrapped(context.Background(), &compose.ToolInput{
+	out, err := wrapped(context.Background(), &compose.ToolInput{
 		Name:      "test_tool",
 		Arguments: `{}`,
 	})
-	if err == nil {
-		t.Fatal("expected error to propagate for non-recoverable errors")
+	// Default-soft: non-cancel errors are converted to tool-result messages.
+	if err != nil {
+		t.Fatalf("expected nil error (soft recovery), got: %v", err)
 	}
-	if err != origErr {
-		t.Fatalf("expected original error, got: %v", err)
+	if out == nil || out.Result == "" {
+		t.Fatal("expected non-empty recovery message")
 	}
 }
 

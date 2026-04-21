@@ -2,11 +2,9 @@
 package mcp
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,7 +14,6 @@ import (
 
 	"cyberstrike-ai/internal/config"
 
-	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.uber.org/zap"
 )
@@ -268,172 +265,6 @@ func mustJSON(v interface{}) []byte {
 	return b
 }
 
-// simpleHTTPClient 简单 JSON-RPC over HTTP：每次请求一次 POST、响应在 body。实现 ExternalMCPClient。
-// 用于自建 MCP（如 http://127.0.0.1:8081/mcp）或其它仅支持简单 POST 的端点。
-type simpleHTTPClient struct {
-	url    string
-	client *http.Client
-	logger *zap.Logger
-	mu     sync.RWMutex
-	status string
-}
-
-func newSimpleHTTPClient(ctx context.Context, url string, timeout time.Duration, headers map[string]string, logger *zap.Logger) (ExternalMCPClient, error) {
-	c := &simpleHTTPClient{
-		url:    url,
-		client: httpClientWithTimeoutAndHeaders(timeout, headers),
-		logger: logger,
-		status: "connecting",
-	}
-	if err := c.initialize(ctx); err != nil {
-		return nil, err
-	}
-	c.mu.Lock()
-	c.status = "connected"
-	c.mu.Unlock()
-	return c, nil
-}
-
-func (c *simpleHTTPClient) setStatus(s string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.status = s
-}
-
-func (c *simpleHTTPClient) GetStatus() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.status
-}
-
-func (c *simpleHTTPClient) IsConnected() bool {
-	return c.GetStatus() == "connected"
-}
-
-func (c *simpleHTTPClient) Initialize(context.Context) error {
-	return nil // 已在 newSimpleHTTPClient 中完成
-}
-
-func (c *simpleHTTPClient) initialize(ctx context.Context) error {
-	params := InitializeRequest{
-		ProtocolVersion: ProtocolVersion,
-		Capabilities:    make(map[string]interface{}),
-		ClientInfo:      ClientInfo{Name: clientName, Version: clientVersion},
-	}
-	paramsJSON, _ := json.Marshal(params)
-	req := &Message{
-		ID:      MessageID{value: "1"},
-		Method:  "initialize",
-		Version: "2.0",
-		Params:  paramsJSON,
-	}
-	resp, err := c.sendRequest(ctx, req)
-	if err != nil {
-		return fmt.Errorf("initialize: %w", err)
-	}
-	if resp.Error != nil {
-		return fmt.Errorf("initialize: %s (code %d)", resp.Error.Message, resp.Error.Code)
-	}
-	// 发送 notifications/initialized（协议要求）
-	notify := &Message{
-		ID:      MessageID{value: nil},
-		Method:  "notifications/initialized",
-		Version: "2.0",
-		Params:  json.RawMessage("{}"),
-	}
-	_ = c.sendNotification(notify)
-	return nil
-}
-
-func (c *simpleHTTPClient) sendRequest(ctx context.Context, msg *Message) (*Message, error) {
-	body, err := json.Marshal(msg)
-	if err != nil {
-		return nil, err
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := c.client.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))
-	}
-	var out Message
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (c *simpleHTTPClient) sendNotification(msg *Message) error {
-	body, _ := json.Marshal(msg)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := c.client.Do(httpReq)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	return nil
-}
-
-func (c *simpleHTTPClient) ListTools(ctx context.Context) ([]Tool, error) {
-	req := &Message{
-		ID:      MessageID{value: uuid.New().String()},
-		Method:  "tools/list",
-		Version: "2.0",
-		Params:  json.RawMessage("{}"),
-	}
-	resp, err := c.sendRequest(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.Error != nil {
-		return nil, fmt.Errorf("tools/list: %s (code %d)", resp.Error.Message, resp.Error.Code)
-	}
-	var listResp ListToolsResponse
-	if err := json.Unmarshal(resp.Result, &listResp); err != nil {
-		return nil, err
-	}
-	return listResp.Tools, nil
-}
-
-func (c *simpleHTTPClient) CallTool(ctx context.Context, name string, args map[string]interface{}) (*ToolResult, error) {
-	params := CallToolRequest{Name: name, Arguments: args}
-	paramsJSON, _ := json.Marshal(params)
-	req := &Message{
-		ID:      MessageID{value: uuid.New().String()},
-		Method:  "tools/call",
-		Version: "2.0",
-		Params:  paramsJSON,
-	}
-	resp, err := c.sendRequest(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.Error != nil {
-		return nil, fmt.Errorf("tools/call: %s (code %d)", resp.Error.Message, resp.Error.Code)
-	}
-	var callResp CallToolResponse
-	if err := json.Unmarshal(resp.Result, &callResp); err != nil {
-		return nil, err
-	}
-	return &ToolResult{Content: callResp.Content, IsError: callResp.IsError}, nil
-}
-
-func (c *simpleHTTPClient) Close() error {
-	c.setStatus("disconnected")
-	return nil
-}
-
 // createSDKClient 根据配置创建并连接外部 MCP 客户端（使用官方 SDK），返回实现 ExternalMCPClient 的 *sdkClient
 // 若连接失败返回 (nil, error)。ctx 用于连接超时与取消。
 func createSDKClient(ctx context.Context, serverCfg config.ExternalMCPServerConfig, logger *zap.Logger) (ExternalMCPClient, error) {
@@ -442,21 +273,23 @@ func createSDKClient(ctx context.Context, serverCfg config.ExternalMCPServerConf
 		timeout = 30 * time.Second
 	}
 
-	transport := serverCfg.Transport
+	transport := serverCfg.GetTransportType()
 	if transport == "" {
-		if serverCfg.Command != "" {
-			transport = "stdio"
-		} else if serverCfg.URL != "" {
-			transport = "http"
-		} else {
-			return nil, fmt.Errorf("配置缺少 command 或 url")
+		return nil, fmt.Errorf("配置缺少 command 或 url，且未指定 type/transport")
+	}
+
+	// 构造 ClientOptions：KeepAlive 心跳
+	var clientOpts *mcp.ClientOptions
+	if serverCfg.KeepAlive > 0 {
+		clientOpts = &mcp.ClientOptions{
+			KeepAlive: time.Duration(serverCfg.KeepAlive) * time.Second,
 		}
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{
 		Name:    clientName,
 		Version: clientVersion,
-	}, nil)
+	}, clientOpts)
 
 	var t mcp.Transport
 	switch transport {
@@ -470,12 +303,18 @@ func createSDKClient(ctx context.Context, serverCfg config.ExternalMCPServerConf
 		if len(serverCfg.Env) > 0 {
 			cmd.Env = append(cmd.Env, envMapToSlice(serverCfg.Env)...)
 		}
-		t = &mcp.CommandTransport{Command: cmd}
+		ct := &mcp.CommandTransport{Command: cmd}
+		if serverCfg.TerminateDuration > 0 {
+			ct.TerminateDuration = time.Duration(serverCfg.TerminateDuration) * time.Second
+		}
+		t = ct
 	case "sse":
 		if serverCfg.URL == "" {
 			return nil, fmt.Errorf("sse 模式需要配置 url")
 		}
-		httpClient := httpClientWithTimeoutAndHeaders(timeout, serverCfg.Headers)
+		// SSE 是长连接（GET 流持续打开），不能设置 http.Client.Timeout（会在超时后杀掉整个连接导致 EOF）。
+		// 超时由每次 ListTools/CallTool 的 context 单独控制。
+		httpClient := httpClientForLongLived(serverCfg.Headers)
 		t = &mcp.SSEClientTransport{
 			Endpoint:   serverCfg.URL,
 			HTTPClient: httpClient,
@@ -485,18 +324,16 @@ func createSDKClient(ctx context.Context, serverCfg config.ExternalMCPServerConf
 			return nil, fmt.Errorf("http 模式需要配置 url")
 		}
 		httpClient := httpClientWithTimeoutAndHeaders(timeout, serverCfg.Headers)
-		t = &mcp.StreamableClientTransport{
+		st := &mcp.StreamableClientTransport{
 			Endpoint:   serverCfg.URL,
 			HTTPClient: httpClient,
 		}
-	case "simple_http":
-		// 简单 JSON-RPC HTTP：每次请求一次 POST、响应在 body。用于自建 MCP 或兼容旧端点（如 http://127.0.0.1:8081/mcp）
-		if serverCfg.URL == "" {
-			return nil, fmt.Errorf("simple_http 模式需要配置 url")
+		if serverCfg.MaxRetries > 0 {
+			st.MaxRetries = serverCfg.MaxRetries
 		}
-		return newSimpleHTTPClient(ctx, serverCfg.URL, timeout, serverCfg.Headers, logger)
+		t = st
 	default:
-		return nil, fmt.Errorf("不支持的传输模式: %s", transport)
+		return nil, fmt.Errorf("不支持的传输模式: %s（支持: stdio, sse, http）", transport)
 	}
 
 	session, err := client.Connect(ctx, t, nil)
@@ -535,6 +372,23 @@ func httpClientWithTimeoutAndHeaders(timeout time.Duration, headers map[string]s
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
+	}
+}
+
+// httpClientForLongLived 创建不设超时的 HTTP 客户端，用于 SSE 等长连接传输。
+// SSE 的 GET 流会持续打开，http.Client.Timeout 会在超时后强制关闭连接导致 EOF。
+// 超时由调用方通过 context 控制。
+func httpClientForLongLived(headers map[string]string) *http.Client {
+	transport := http.DefaultTransport
+	if len(headers) > 0 {
+		transport = &headerRoundTripper{
+			headers: headers,
+			base:    http.DefaultTransport,
+		}
+	}
+	return &http.Client{
+		Transport: transport,
+		// 不设 Timeout，SSE 长连接的超时由 per-request context 控制
 	}
 }
 

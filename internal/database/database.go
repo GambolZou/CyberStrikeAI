@@ -4,10 +4,19 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
 )
+
+// configureDBPool 设置 SQLite 连接池参数，提升并发稳定性
+func configureDBPool(db *sql.DB) {
+	// SQLite 同一时间只允许一个写入者，限制连接数避免 "database is locked" 错误
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
+}
 
 // DB 数据库连接
 type DB struct {
@@ -17,10 +26,12 @@ type DB struct {
 
 // NewDB 创建数据库连接
 func NewDB(dbPath string, logger *zap.Logger) (*DB, error) {
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=1")
+	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=1&_busy_timeout=5000&_synchronous=NORMAL")
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库失败: %w", err)
 	}
+
+	configureDBPool(db)
 
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("连接数据库失败: %w", err)
@@ -674,10 +685,12 @@ func (db *DB) migrateBatchTaskQueuesTable() error {
 
 // NewKnowledgeDB 创建知识库数据库连接（只包含知识库相关的表）
 func NewKnowledgeDB(dbPath string, logger *zap.Logger) (*DB, error) {
-	sqlDB, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=1")
+	sqlDB, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=1&_busy_timeout=5000&_synchronous=NORMAL")
 	if err != nil {
 		return nil, fmt.Errorf("打开知识库数据库失败: %w", err)
 	}
+
+	configureDBPool(sqlDB)
 
 	if err := sqlDB.Ping(); err != nil {
 		return nil, fmt.Errorf("连接知识库数据库失败: %w", err)

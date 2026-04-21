@@ -230,54 +230,61 @@ attemptLoop:
 				continue
 			}
 			if ev.Err != nil {
-				canRetry := attempt+1 < maxToolCallRecoveryAttempts
-
-				if canRetry && isRecoverableToolCallArgumentsJSONError(ev.Err) {
-					if logger != nil {
-						logger.Warn("eino: recoverable tool-call JSON error from model/API", zap.Error(ev.Err), zap.Int("attempt", attempt))
-					}
-					retryHints = append(retryHints, toolCallArgumentsJSONRetryHint())
-					if progress != nil {
-						progress("eino_recovery", toolCallArgumentsJSONRecoveryTimelineMessage(attempt), map[string]interface{}{
-							"conversationId": conversationID,
-							"source":         "eino",
-							"einoRetry":      attempt,
-							"runIndex":       attempt + 1,
-							"maxRuns":        maxToolCallRecoveryAttempts,
-							"reason":         "invalid_tool_arguments_json",
-						})
-					}
-					continue attemptLoop
-				}
-
-				if canRetry && isRecoverableToolExecutionError(ev.Err) {
-					if logger != nil {
-						logger.Warn("eino: recoverable tool execution error, will retry with corrective hint",
-							zap.Error(ev.Err), zap.Int("attempt", attempt))
-					}
+				// context.Canceled 是唯一应当直接终止编排的错误（用户关闭页面、主动停止等）。
+				if errors.Is(ev.Err, context.Canceled) {
 					flushAllPendingAsFailed(ev.Err)
-					retryHints = append(retryHints, toolExecutionRetryHint())
 					if progress != nil {
-						progress("eino_recovery", toolExecutionRecoveryTimelineMessage(attempt), map[string]interface{}{
+						progress("error", ev.Err.Error(), map[string]interface{}{
 							"conversationId": conversationID,
 							"source":         "eino",
-							"einoRetry":      attempt,
-							"runIndex":       attempt + 1,
-							"maxRuns":        maxToolCallRecoveryAttempts,
-							"reason":         "tool_execution_error",
 						})
 					}
-					continue attemptLoop
+					return nil, ev.Err
 				}
 
+				canRetry := attempt+1 < maxToolCallRecoveryAttempts
+				if !canRetry {
+					// 重试次数已耗尽，终止。
+					flushAllPendingAsFailed(ev.Err)
+					if progress != nil {
+						progress("error", ev.Err.Error(), map[string]interface{}{
+							"conversationId": conversationID,
+							"source":         "eino",
+						})
+					}
+					return nil, ev.Err
+				}
+
+				// 区分错误类型以选择最合适的纠错提示，但无论哪种都执行重试（default-soft）。
+				var hint *schema.Message
+				var reason, timelineMsg string
+				if isRecoverableToolCallArgumentsJSONError(ev.Err) {
+					hint = toolCallArgumentsJSONRetryHint()
+					reason = "invalid_tool_arguments_json"
+					timelineMsg = toolCallArgumentsJSONRecoveryTimelineMessage(attempt)
+				} else {
+					hint = toolExecutionRetryHint()
+					reason = "tool_execution_error"
+					timelineMsg = toolExecutionRecoveryTimelineMessage(attempt)
+				}
+
+				if logger != nil {
+					logger.Warn("eino: recoverable error, will retry with corrective hint",
+						zap.Error(ev.Err), zap.Int("attempt", attempt), zap.String("reason", reason))
+				}
 				flushAllPendingAsFailed(ev.Err)
+				retryHints = append(retryHints, hint)
 				if progress != nil {
-					progress("error", ev.Err.Error(), map[string]interface{}{
+					progress("eino_recovery", timelineMsg, map[string]interface{}{
 						"conversationId": conversationID,
 						"source":         "eino",
+						"einoRetry":      attempt,
+						"runIndex":       attempt + 1,
+						"maxRuns":        maxToolCallRecoveryAttempts,
+						"reason":         reason,
 					})
 				}
-				return nil, ev.Err
+				continue attemptLoop
 			}
 			if ev.AgentName != "" && progress != nil {
 				iterEinoAgent := orchestratorName

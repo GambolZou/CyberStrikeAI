@@ -41,62 +41,27 @@ func softRecoveryToolCallMiddleware() compose.InvokableToolMiddleware {
 
 // isSoftRecoverableToolError determines whether a tool execution error should be
 // silently converted to a tool-result message rather than crashing the graph.
+//
+// Design: default-soft (blacklist). Almost every tool execution error should be
+// fed back to the LLM so it can self-correct or choose an alternative tool.
+// Only a small set of "truly fatal" conditions (user cancellation) should
+// propagate as hard errors that terminate the orchestration graph.
+// This avoids the fragile whitelist approach where every new error pattern
+// would need to be explicitly enumerated.
 func isSoftRecoverableToolError(err error) bool {
 	if err == nil {
 		return false
 	}
 
-	// 用户取消 — 不应重试，让 hard error 传播以终止编排。
+	// 用户主动取消 — 唯一应当终止编排的情况，不应重试。
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
 
-	// 工具执行超时 — 转为 soft error 让 LLM 知晓并选择替代方案，而非全局重试。
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-
-	s := strings.ToLower(err.Error())
-
-	// JSON unmarshal/parse failures — the model generated truncated or malformed arguments.
-	if isJSONRelatedError(s) {
-		return true
-	}
-
-	// Sub-agent type not found (from deep/task_tool.go)
-	if strings.Contains(s, "subagent type") && strings.Contains(s, "not found") {
-		return true
-	}
-
-	// Tool not found in ToolsNode indexes
-	if strings.Contains(s, "tool") && strings.Contains(s, "not found") {
-		return true
-	}
-
-	return false
-}
-
-// isJSONRelatedError checks whether an error string indicates a JSON parsing problem.
-func isJSONRelatedError(lower string) bool {
-	if !strings.Contains(lower, "json") {
-		return false
-	}
-	jsonIndicators := []string{
-		"unexpected end of json",
-		"unmarshal",
-		"invalid character",
-		"cannot unmarshal",
-		"invalid tool arguments",
-		"failed to unmarshal",
-		"must be in json format",
-		"unexpected eof",
-	}
-	for _, ind := range jsonIndicators {
-		if strings.Contains(lower, ind) {
-			return true
-		}
-	}
-	return false
+	// 其他所有工具执行错误（超时、命令不存在、JSON 解析失败、工具未找到、
+	// 权限不足、网络不可达……）一律转为 soft error，让 LLM 看到错误信息
+	// 后自行决策：换工具、调整参数、或向用户说明。
+	return true
 }
 
 // buildSoftRecoveryMessage creates a bilingual error message that the LLM can act on.
