@@ -13575,29 +13575,87 @@ header {
 
 .vulnerability-details {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 12px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px 16px;
     margin-bottom: 16px;
     padding: 12px;
     background: var(--bg-secondary);
     border-radius: 6px;
+    align-items: start;
 }
 
-.detail-item {
+/* 元数据条数为奇数时，最后一项占满一行，长 URL/队列 ID 更易读 */
+.vulnerability-details .vuln-detail-field:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+}
+
+@media (max-width: 768px) {
+    .vulnerability-details {
+        grid-template-columns: 1fr;
+    }
+
+    .vulnerability-details .vuln-detail-field:last-child:nth-child(odd) {
+        grid-column: auto;
+    }
+}
+
+/* 漏洞详情字段：标签与值分行，长 ID/URL 可换行、可选中复制 */
+.vuln-detail-field {
+    min-width: 0;
     font-size: 0.875rem;
 }
 
-.detail-item strong {
+.vuln-detail-field__label {
     color: var(--text-secondary);
-    margin-right: 4px;
+    font-weight: 600;
+    font-size: 0.75rem;
+    margin-bottom: 6px;
+    text-transform: none;
+    letter-spacing: normal;
 }
 
-.detail-item code {
+.vuln-detail-field__row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    min-width: 0;
+}
+
+.vuln-detail-field-value {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    padding: 8px 10px;
+    border-radius: 6px;
     background: var(--bg-tertiary);
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 0.8rem;
-    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    border: 1px solid var(--border-color);
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    user-select: text;
+    -webkit-user-select: text;
+    color: var(--text-primary);
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+}
+
+.vuln-detail-field__copy {
+    flex-shrink: 0;
+    margin-top: 2px;
+    padding: 6px;
+    line-height: 0;
+    border-radius: 6px;
+    color: var(--text-secondary);
+    border: 1px solid transparent;
+    background: transparent;
+    cursor: pointer;
+}
+
+.vuln-detail-field__copy:hover {
+    color: var(--accent-color);
+    background: var(--bg-primary);
+    border-color: var(--border-color);
 }
 
 .vulnerability-proof,
